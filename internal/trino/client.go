@@ -3,7 +3,6 @@ package trino
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"fmt"
 	"log"
 	"net/http"
@@ -49,10 +48,9 @@ func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 
 // Client is a wrapper around Trino client
 type Client struct {
-	db        *sql.DB
-	connector driver.Connector
-	config    *config.TrinoConfig
-	timeout   time.Duration
+	db      *sql.DB
+	config  *config.TrinoConfig
+	timeout time.Duration
 }
 
 // NewClient creates a new Trino client
@@ -79,7 +77,9 @@ func NewClient(cfg *config.TrinoConfig) (*Client, error) {
 			config: cfg,
 		},
 	}
-	trino.RegisterCustomClient("mcp-trino", httpClient)
+	if err := trino.RegisterCustomClient("mcp-trino", httpClient); err != nil {
+		return nil, fmt.Errorf("failed to register custom HTTP client: %w", err)
+	}
 
 	db, err := sql.Open("trino", dsn)
 	if err != nil {
