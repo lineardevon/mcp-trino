@@ -3,41 +3,84 @@ package trino
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"log"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
-	_ "github.com/trinodb/trino-go-client/trino"
+	"github.com/trinodb/trino-go-client/trino"
 	"github.com/tuannvm/mcp-trino/internal/config"
 )
 
+// Context key for impersonated user
+type contextKey string
+
+const (
+	impersonatedUserKey contextKey = "impersonated_user"
+)
+
+// headerRoundTripper adds X-Trino-Source and X-Trino-User headers to requests
+type headerRoundTripper struct {
+	base   http.RoundTripper
+	config *config.TrinoConfig
+}
+
+func (t *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+
+	// Set X-Trino-Source header for query attribution
+	if t.config.TrinoSource != "" {
+		req.Header.Set("X-Trino-Source", t.config.TrinoSource)
+	}
+
+	// Set X-Trino-User header if impersonation is enabled
+	if t.config.EnableImpersonation {
+		if user, ok := req.Context().Value(impersonatedUserKey).(string); ok && user != "" {
+			req.Header.Set("X-Trino-User", user)
+		}
+	}
+
+	return t.base.RoundTrip(req)
+}
+
 // Client is a wrapper around Trino client
 type Client struct {
-	db      *sql.DB
-	config  *config.TrinoConfig
-	timeout time.Duration
+	db        *sql.DB
+	connector driver.Connector
+	config    *config.TrinoConfig
+	timeout   time.Duration
 }
 
 // NewClient creates a new Trino client
 func NewClient(cfg *config.TrinoConfig) (*Client, error) {
-	dsn := fmt.Sprintf("%s://%s:%s@%s:%d?catalog=%s&schema=%s&SSL=%t&SSLInsecure=%t",
-		cfg.Scheme,
-		url.QueryEscape(cfg.User),
-		url.QueryEscape(cfg.Password),
-		cfg.Host,
-		cfg.Port,
-		url.QueryEscape(cfg.Catalog),
-		url.QueryEscape(cfg.Schema),
-		cfg.SSL,
-		cfg.SSLInsecure)
+	dsnURL := url.URL{
+		Scheme: cfg.Scheme,
+		User:   url.UserPassword(cfg.User, cfg.Password),
+		Host:   fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+	}
 
-	// The Trino driver registers itself with database/sql on import
-	// We can just use sql.Open directly with the trino driver
+	params := url.Values{}
+	params.Add("catalog", cfg.Catalog)
+	params.Add("schema", cfg.Schema)
+	params.Add("SSL", fmt.Sprintf("%t", cfg.SSL))
+	params.Add("SSLInsecure", fmt.Sprintf("%t", cfg.SSLInsecure))
+	params.Add("custom_client", "mcp-trino")
 
-	// Open a connection
+	dsnURL.RawQuery = params.Encode()
+	dsn := dsnURL.String()
+
+	httpClient := &http.Client{
+		Transport: &headerRoundTripper{
+			base:   http.DefaultTransport,
+			config: cfg,
+		},
+	}
+	trino.RegisterCustomClient("mcp-trino", httpClient)
+
 	db, err := sql.Open("trino", dsn)
 	if err != nil {
 		// Sanitize error to prevent password exposure
@@ -71,6 +114,17 @@ func NewClient(cfg *config.TrinoConfig) (*Client, error) {
 // Close closes the database connection
 func (c *Client) Close() error {
 	return c.db.Close()
+}
+
+// WithImpersonatedUser adds impersonated user to context
+func WithImpersonatedUser(ctx context.Context, username string) context.Context {
+	return context.WithValue(ctx, impersonatedUserKey, username)
+}
+
+// GetImpersonatedUser retrieves impersonated user from context
+func GetImpersonatedUser(ctx context.Context) (string, bool) {
+	user, ok := ctx.Value(impersonatedUserKey).(string)
+	return user, ok
 }
 
 // isReadOnlyQuery checks if the SQL query is read-only (SELECT, SHOW, DESCRIBE, EXPLAIN)
@@ -219,6 +273,11 @@ func sanitizeQueryForKeywordDetection(query string) string {
 
 // ExecuteQuery executes a SQL query and returns the results
 func (c *Client) ExecuteQuery(query string) ([]map[string]interface{}, error) {
+	return c.ExecuteQueryWithContext(context.Background(), query)
+}
+
+// ExecuteQueryWithContext executes a SQL query and returns the results
+func (c *Client) ExecuteQueryWithContext(ctx context.Context, query string) ([]map[string]interface{}, error) {
 	// Strip trailing semicolon that Trino doesn't allow
 	query = strings.TrimSuffix(strings.TrimSpace(query), ";")
 
@@ -228,11 +287,12 @@ func (c *Client) ExecuteQuery(query string) ([]map[string]interface{}, error) {
 			"Set TRINO_ALLOW_WRITE_QUERIES=true to enable write operations (at your own risk)")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	// Create context with timeout, preserving any impersonation data
+	queryCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
 	// Execute the query
-	rows, err := c.db.QueryContext(ctx, query)
+	rows, err := c.db.QueryContext(queryCtx, query)
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
@@ -288,7 +348,12 @@ func (c *Client) ExecuteQuery(query string) ([]map[string]interface{}, error) {
 
 // ListCatalogs returns a list of available catalogs
 func (c *Client) ListCatalogs() ([]string, error) {
-	results, err := c.ExecuteQuery("SHOW CATALOGS")
+	return c.ListCatalogsWithContext(context.Background())
+}
+
+// ListCatalogsWithContext returns a list of available catalogs with context
+func (c *Client) ListCatalogsWithContext(ctx context.Context) ([]string, error) {
+	results, err := c.ExecuteQueryWithContext(ctx, "SHOW CATALOGS")
 	if err != nil {
 		return nil, err
 	}
@@ -310,12 +375,17 @@ func (c *Client) ListCatalogs() ([]string, error) {
 
 // ListSchemas returns a list of schemas in the specified catalog
 func (c *Client) ListSchemas(catalog string) ([]string, error) {
+	return c.ListSchemasWithContext(context.Background(), catalog)
+}
+
+// ListSchemasWithContext returns a list of schemas in the specified catalog with context
+func (c *Client) ListSchemasWithContext(ctx context.Context, catalog string) ([]string, error) {
 	if catalog == "" {
 		catalog = c.config.Catalog
 	}
 
 	query := fmt.Sprintf("SHOW SCHEMAS FROM %s", catalog)
-	results, err := c.ExecuteQuery(query)
+	results, err := c.ExecuteQueryWithContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -337,6 +407,11 @@ func (c *Client) ListSchemas(catalog string) ([]string, error) {
 
 // ListTables returns a list of tables in the specified catalog and schema
 func (c *Client) ListTables(catalog, schema string) ([]string, error) {
+	return c.ListTablesWithContext(context.Background(), catalog, schema)
+}
+
+// ListTablesWithContext returns a list of tables in the specified catalog and schema with context
+func (c *Client) ListTablesWithContext(ctx context.Context, catalog, schema string) ([]string, error) {
 	if catalog == "" {
 		catalog = c.config.Catalog
 	}
@@ -345,7 +420,7 @@ func (c *Client) ListTables(catalog, schema string) ([]string, error) {
 	}
 
 	query := fmt.Sprintf("SHOW TABLES FROM %s.%s", catalog, schema)
-	results, err := c.ExecuteQuery(query)
+	results, err := c.ExecuteQueryWithContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -367,6 +442,11 @@ func (c *Client) ListTables(catalog, schema string) ([]string, error) {
 
 // GetTableSchema returns the schema of a table
 func (c *Client) GetTableSchema(catalog, schema, table string) ([]map[string]interface{}, error) {
+	return c.GetTableSchemaWithContext(context.Background(), catalog, schema, table)
+}
+
+// GetTableSchemaWithContext returns the schema of a table with context
+func (c *Client) GetTableSchemaWithContext(ctx context.Context, catalog, schema, table string) ([]map[string]interface{}, error) {
 	// Resolve catalog/schema/table parameters first
 	parts := strings.Split(table, ".")
 	if len(parts) == 3 {
@@ -400,11 +480,16 @@ func (c *Client) GetTableSchema(catalog, schema, table string) ([]map[string]int
 
 	// Build and execute query with resolved parameters
 	query := fmt.Sprintf("DESCRIBE %s.%s.%s", catalog, schema, table)
-	return c.ExecuteQuery(query)
+	return c.ExecuteQueryWithContext(ctx, query)
 }
 
 // ExplainQuery returns the query execution plan for a given SQL query
 func (c *Client) ExplainQuery(query string, format string) ([]map[string]interface{}, error) {
+	return c.ExplainQueryWithContext(context.Background(), query, format)
+}
+
+// ExplainQueryWithContext returns the query execution plan for a given SQL query with context
+func (c *Client) ExplainQueryWithContext(ctx context.Context, query string, format string) ([]map[string]interface{}, error) {
 	// Build EXPLAIN query with optional TYPE format (LOGICAL|DISTRIBUTED|VALIDATE|IO)
 	explainQuery := "EXPLAIN"
 	if f := strings.ToUpper(strings.TrimSpace(format)); f != "" {
@@ -417,7 +502,7 @@ func (c *Client) ExplainQuery(query string, format string) ([]map[string]interfa
 	}
 	explainQuery = fmt.Sprintf("%s %s", explainQuery, query)
 
-	return c.ExecuteQuery(explainQuery)
+	return c.ExecuteQueryWithContext(ctx, explainQuery)
 }
 
 // sanitizeConnectionError removes sensitive information from connection errors

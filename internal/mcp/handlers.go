@@ -8,23 +8,54 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
+	"github.com/tuannvm/mcp-trino/internal/config"
+	oauth "github.com/tuannvm/oauth-mcp-proxy"
 	"github.com/tuannvm/mcp-trino/internal/trino"
 )
 
 // TrinoHandlers contains all handlers for Trino-related tools
 type TrinoHandlers struct {
 	TrinoClient *trino.Client
+	Config      *config.TrinoConfig
 }
 
 // NewTrinoHandlers creates a new set of Trino handlers
-func NewTrinoHandlers(client *trino.Client) *TrinoHandlers {
+func NewTrinoHandlers(client *trino.Client, cfg *config.TrinoConfig) *TrinoHandlers {
 	return &TrinoHandlers{
 		TrinoClient: client,
+		Config:      cfg,
 	}
+}
+
+// prepareImpersonationContext adds impersonated user to context
+func (h *TrinoHandlers) prepareImpersonationContext(ctx context.Context) context.Context {
+	if user, ok := oauth.GetUserFromContext(ctx); ok {
+		var principal string
+		switch h.Config.ImpersonationField {
+		case "email":
+			principal = user.Email
+		case "subject":
+			principal = user.Subject
+		case "username":
+			fallthrough
+		default:
+			principal = user.Username
+		}
+
+		if principal != "" {
+			return trino.WithImpersonatedUser(ctx, principal)
+		} else {
+			log.Printf("Warning: Impersonation enabled but %s field is empty for user", h.Config.ImpersonationField)
+		}
+	}
+	return ctx
 }
 
 // ExecuteQuery handles query execution
 func (h *TrinoHandlers) ExecuteQuery(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+    if h.Config.EnableImpersonation {
+        ctx = h.prepareImpersonationContext(ctx)
+    }
 
 	// Type assert Arguments to map[string]interface{}
 	args, ok := request.Params.Arguments.(map[string]interface{})
@@ -40,8 +71,7 @@ func (h *TrinoHandlers) ExecuteQuery(ctx context.Context, request mcp.CallToolRe
 		return mcp.NewToolResultErrorFromErr(mcpErr.Error(), mcpErr), nil
 	}
 
-	// Execute the query - SQL injection protection is handled within the client
-	results, err := h.TrinoClient.ExecuteQuery(query)
+	results, err := h.TrinoClient.ExecuteQueryWithContext(ctx, query)
 	if err != nil {
 		log.Printf("Error executing query: %v", err)
 		mcpErr := fmt.Errorf("query execution failed: %w", err)
@@ -61,8 +91,11 @@ func (h *TrinoHandlers) ExecuteQuery(ctx context.Context, request mcp.CallToolRe
 
 // ListCatalogs handles catalog listing
 func (h *TrinoHandlers) ListCatalogs(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if h.Config.EnableImpersonation {
+		ctx = h.prepareImpersonationContext(ctx)
+	}
 
-	catalogs, err := h.TrinoClient.ListCatalogs()
+	catalogs, err := h.TrinoClient.ListCatalogsWithContext(ctx)
 	if err != nil {
 		log.Printf("Error listing catalogs: %v", err)
 		mcpErr := fmt.Errorf("failed to list catalogs: %w", err)
@@ -81,6 +114,9 @@ func (h *TrinoHandlers) ListCatalogs(ctx context.Context, request mcp.CallToolRe
 
 // ListSchemas handles schema listing
 func (h *TrinoHandlers) ListSchemas(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if h.Config.EnableImpersonation {
+		ctx = h.prepareImpersonationContext(ctx)
+	}
 
 	// Type assert Arguments to map[string]interface{}
 	args, ok := request.Params.Arguments.(map[string]interface{})
@@ -95,7 +131,7 @@ func (h *TrinoHandlers) ListSchemas(ctx context.Context, request mcp.CallToolReq
 		catalog = catalogParam
 	}
 
-	schemas, err := h.TrinoClient.ListSchemas(catalog)
+	schemas, err := h.TrinoClient.ListSchemasWithContext(ctx, catalog)
 	if err != nil {
 		log.Printf("Error listing schemas: %v", err)
 		mcpErr := fmt.Errorf("failed to list schemas: %w", err)
@@ -114,6 +150,9 @@ func (h *TrinoHandlers) ListSchemas(ctx context.Context, request mcp.CallToolReq
 
 // ListTables handles table listing
 func (h *TrinoHandlers) ListTables(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if h.Config.EnableImpersonation {
+		ctx = h.prepareImpersonationContext(ctx)
+	}
 
 	// Type assert Arguments to map[string]interface{}
 	args, ok := request.Params.Arguments.(map[string]interface{})
@@ -131,7 +170,7 @@ func (h *TrinoHandlers) ListTables(ctx context.Context, request mcp.CallToolRequ
 		schema = schemaParam
 	}
 
-	tables, err := h.TrinoClient.ListTables(catalog, schema)
+	tables, err := h.TrinoClient.ListTablesWithContext(ctx, catalog, schema)
 	if err != nil {
 		log.Printf("Error listing tables: %v", err)
 		mcpErr := fmt.Errorf("failed to list tables: %w", err)
@@ -150,6 +189,9 @@ func (h *TrinoHandlers) ListTables(ctx context.Context, request mcp.CallToolRequ
 
 // GetTableSchema handles table schema retrieval
 func (h *TrinoHandlers) GetTableSchema(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if h.Config.EnableImpersonation {
+		ctx = h.prepareImpersonationContext(ctx)
+	}
 
 	// Type assert Arguments to map[string]interface{}
 	args, ok := request.Params.Arguments.(map[string]interface{})
@@ -177,7 +219,7 @@ func (h *TrinoHandlers) GetTableSchema(ctx context.Context, request mcp.CallTool
 	}
 	table = tableParam
 
-	tableSchema, err := h.TrinoClient.GetTableSchema(catalog, schema, table)
+	tableSchema, err := h.TrinoClient.GetTableSchemaWithContext(ctx, catalog, schema, table)
 	if err != nil {
 		log.Printf("Error getting table schema: %v", err)
 		mcpErr := fmt.Errorf("failed to get table schema: %w", err)
@@ -196,6 +238,9 @@ func (h *TrinoHandlers) GetTableSchema(ctx context.Context, request mcp.CallTool
 
 // ExplainQuery handles query plan analysis
 func (h *TrinoHandlers) ExplainQuery(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	if h.Config.EnableImpersonation {
+		ctx = h.prepareImpersonationContext(ctx)
+	}
 
 	// Type assert Arguments to map[string]interface{}
 	args, ok := request.Params.Arguments.(map[string]interface{})
@@ -218,7 +263,7 @@ func (h *TrinoHandlers) ExplainQuery(ctx context.Context, request mcp.CallToolRe
 	}
 
 	// Execute the explain query
-	results, err := h.TrinoClient.ExplainQuery(query, format)
+	results, err := h.TrinoClient.ExplainQueryWithContext(ctx, query, format)
 	if err != nil {
 		log.Printf("Error explaining query: %v", err)
 		mcpErr := fmt.Errorf("query explanation failed: %w", err)
