@@ -56,7 +56,6 @@ type Client struct {
 	authenticator *ExternalAuthenticator
 	initialized   bool
 	mu            sync.Mutex // Protects concurrent access to connection state
-	httpClient    *http.Client
 }
 
 // NewClient creates a new Trino client
@@ -78,9 +77,8 @@ func NewClient(cfg *config.TrinoConfig) (*Client, error) {
 	}
 
 	client := &Client{
-		config:     cfg,
-		timeout:    cfg.QueryTimeout,
-		httpClient: httpClient,
+		config:  cfg,
+		timeout: cfg.QueryTimeout,
 	}
 
 	// If external auth is enabled, defer connection until first query (lazy auth)
