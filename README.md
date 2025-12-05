@@ -104,6 +104,7 @@ graph TB
 - ✅ User Identity Tracking:
   - **Query Attribution** (automatic): Tags queries with OAuth user via `X-Trino-Client-Tags/Info` headers
   - **User Impersonation** (opt-in): Execute queries as OAuth user via `X-Trino-User` header
+- ✅ Trino External Authentication (browser-based SSO) for clusters with native OAuth
 
 ## Installation & Quick Start
 
@@ -169,6 +170,18 @@ export TRINO_ALLOWED_SCHEMAS="hive.analytics,hive.marts,hive.reporting"
 export TRINO_ENABLE_IMPERSONATION=true
 export TRINO_IMPERSONATION_FIELD=email  # Options: username, email, subject
 ```
+
+**Trino External Authentication:**
+
+For Trino clusters with browser-based SSO (Okta, Azure AD, etc.), use Trino's native external authentication instead of MCP OAuth:
+
+```bash
+# Enable Trino's browser OAuth flow
+export TRINO_EXTERNAL_AUTH=true
+export TRINO_EXTERNAL_AUTH_TIMEOUT=300  # seconds for user to complete login (default: 300)
+```
+
+On first query, opens browser for SSO login, then caches the token for subsequent queries. Automatically re-authenticates on token expiry.
 
 For complete configuration, see [Deployment Guide](docs/deployment.md), [OAuth Guide](docs/oauth.md), [Allowlists Guide](docs/allowlists.md), and [User Identity Guide](docs/impersonation.md).
 
