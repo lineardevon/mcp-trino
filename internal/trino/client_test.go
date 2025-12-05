@@ -2,6 +2,8 @@ package trino
 
 import (
 	"context"
+	"crypto/tls"
+	"net/http"
 	"reflect"
 	"strings"
 	"testing"
@@ -493,5 +495,153 @@ func TestGetQueryUsername(t *testing.T) {
 			}
 		})
 	}
+}
 
+func TestCreateTransport(t *testing.T) {
+	tests := []struct {
+		name                     string
+		sslInsecure              bool
+		expectInsecureSkipVerify bool
+		expectTransportNotNil    bool
+		expectTLSConfigNotNil    bool
+	}{
+		{
+			name:                     "SSLInsecure true - should skip certificate verification",
+			sslInsecure:              true,
+			expectInsecureSkipVerify: true,
+			expectTransportNotNil:    true,
+			expectTLSConfigNotNil:    true,
+		},
+		{
+			name:                     "SSLInsecure false - should verify certificates",
+			sslInsecure:              false,
+			expectInsecureSkipVerify: false,
+			expectTransportNotNil:    true,
+			expectTLSConfigNotNil:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := createTransport(tt.sslInsecure)
+
+			if transport == nil {
+				if tt.expectTransportNotNil {
+					t.Fatal("createTransport() returned nil, expected non-nil transport")
+				}
+				return
+			}
+
+			if tt.sslInsecure {
+				if transport.TLSClientConfig == nil {
+					t.Fatal("TLSClientConfig is nil when SSLInsecure is true")
+				}
+				if transport.TLSClientConfig.InsecureSkipVerify != tt.expectInsecureSkipVerify {
+					t.Errorf("InsecureSkipVerify = %v, want %v",
+						transport.TLSClientConfig.InsecureSkipVerify, tt.expectInsecureSkipVerify)
+				}
+			} else {
+				if transport.TLSClientConfig != nil && transport.TLSClientConfig.InsecureSkipVerify {
+					t.Error("InsecureSkipVerify should be false when SSLInsecure is false")
+				}
+			}
+		})
+	}
+}
+
+func TestCreateTransport_ClonesDefaultTransport(t *testing.T) {
+	transport := createTransport(false)
+
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		t.Skip("DefaultTransport is not *http.Transport, skipping clone verification")
+	}
+
+	if transport.MaxIdleConns != defaultTransport.MaxIdleConns {
+		t.Errorf("MaxIdleConns not preserved: got %d, want %d",
+			transport.MaxIdleConns, defaultTransport.MaxIdleConns)
+	}
+	if transport.IdleConnTimeout != defaultTransport.IdleConnTimeout {
+		t.Errorf("IdleConnTimeout not preserved: got %v, want %v",
+			transport.IdleConnTimeout, defaultTransport.IdleConnTimeout)
+	}
+}
+
+func TestCreateTransport_ExplicitlyDisablesInsecureWhenSecure(t *testing.T) {
+	transport := createTransport(false)
+
+	if transport.TLSClientConfig != nil && transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify should be explicitly false when sslInsecure=false")
+	}
+
+	_ = createTransport(true)
+	secureTransport := createTransport(false)
+
+	if secureTransport.TLSClientConfig != nil && secureTransport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("Secure transport should not inherit insecure settings")
+	}
+}
+
+func TestCreateTransport_PreservesExistingTLSConfig(t *testing.T) {
+	transport := createTransport(true)
+
+	if transport.TLSClientConfig == nil {
+		t.Fatal("TLSClientConfig should not be nil when SSLInsecure is true")
+	}
+
+	if !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify should be true")
+	}
+
+	transport.TLSClientConfig.MinVersion = tls.VersionTLS12
+	if transport.TLSClientConfig.MinVersion != tls.VersionTLS12 {
+		t.Error("Should be able to set MinVersion on TLSClientConfig")
+	}
+}
+
+func TestHeaderRoundTripper_WithSSLInsecureTransport(t *testing.T) {
+	baseTransport := createTransport(true)
+	roundTripper := &headerRoundTripper{
+		base: baseTransport,
+	}
+
+	if roundTripper.base == nil {
+		t.Fatal("headerRoundTripper.base should not be nil")
+	}
+
+	transport, ok := roundTripper.base.(*http.Transport)
+	if !ok {
+		t.Fatal("base transport should be *http.Transport")
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatal("TLSClientConfig should not be nil")
+	}
+	if !transport.TLSClientConfig.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify should be true")
+	}
+}
+
+func TestCreateTransport_IndependentInstances(t *testing.T) {
+	transport1 := createTransport(true)
+	transport2 := createTransport(true)
+
+	if transport1 == transport2 {
+		t.Error("createTransport should return different instances")
+	}
+
+	if transport1.TLSClientConfig == nil || !transport1.TLSClientConfig.InsecureSkipVerify {
+		t.Error("transport1 should have InsecureSkipVerify=true")
+	}
+	if transport2.TLSClientConfig == nil || !transport2.TLSClientConfig.InsecureSkipVerify {
+		t.Error("transport2 should have InsecureSkipVerify=true")
+	}
+
+	transport1.TLSClientConfig.InsecureSkipVerify = false
+	if !transport2.TLSClientConfig.InsecureSkipVerify {
+		t.Error("modifying transport1 should not affect transport2")
+	}
+
+	if transport1.TLSClientConfig == transport2.TLSClientConfig {
+		t.Error("TLSClientConfig should be different instances")
+	}
 }

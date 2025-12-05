@@ -52,7 +52,6 @@ func main() {
 	} else {
 		log.Println("External auth enabled - connection will be established on first query")
 	}
-	}
 
 	// Create MCP server
 	log.Println("Initializing MCP server...")
