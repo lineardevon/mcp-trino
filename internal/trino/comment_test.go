@@ -104,8 +104,8 @@ SELECT * FROM "table"`,
 			expected: true,
 		},
 		{
-			name: "Backticks in comment",
-			query: "-- Use `backticks` for identifiers\nSELECT * FROM `table`",
+			name: "Backticks in comment (Trino uses double quotes, not backticks)",
+			query: "-- Use `backticks` for identifiers\nSELECT * FROM \"table\"",
 			expected: true,
 		},
 		{

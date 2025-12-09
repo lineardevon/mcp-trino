@@ -331,20 +331,6 @@ func sanitizeQueryForKeywordDetection(query string) string {
 			continue
 		}
 
-		// Check for backtick-quoted identifier
-		if query[i] == '`' {
-			result.WriteString("`IDENTIFIER`")
-			i++
-			// Skip until closing backtick
-			for i < n && query[i] != '`' {
-				i++
-			}
-			if i < n {
-				i++ // skip closing backtick
-			}
-			continue
-		}
-
 		// Regular character - copy to output
 		result.WriteByte(query[i])
 		i++
