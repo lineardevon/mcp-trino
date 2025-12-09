@@ -226,15 +226,16 @@ func GetImpersonatedUser(ctx context.Context) (string, bool) {
 // isReadOnlyQuery checks if the SQL query is read-only (SELECT, SHOW, DESCRIBE, EXPLAIN)
 // This helps prevent SQL injection attacks by restricting the types of queries allowed
 func isReadOnlyQuery(query string) bool {
+	// Remove string literals and comments FIRST (before normalizing newlines)
+	// This is critical because single-line comments (--) end at newline
+	sanitized := sanitizeQueryForKeywordDetection(query)
+
 	// Convert to lowercase for case-insensitive comparison and normalize whitespace
-	queryLower := strings.ToLower(strings.TrimSpace(query))
+	queryLower := strings.ToLower(strings.TrimSpace(sanitized))
 
 	// Replace any newline characters with spaces to normalize the query format
 	queryLower = strings.ReplaceAll(queryLower, "\n", " ")
 	queryLower = strings.ReplaceAll(queryLower, "\r", " ")
-
-	// Remove string literals and comments to avoid false positives
-	queryLower = sanitizeQueryForKeywordDetection(queryLower)
 
 	// First check for SQL injection attempts with multiple statements
 	if strings.Contains(queryLower, ";") {
@@ -345,26 +346,92 @@ func isAllowedReadOnlyPattern(queryLower string) bool {
 }
 
 // sanitizeQueryForKeywordDetection removes string literals, quoted identifiers, and comments
-// to prevent false positives when detecting write operations
+// to prevent false positives when detecting write operations.
+// Uses a state machine to correctly handle comment markers inside string literals.
 func sanitizeQueryForKeywordDetection(query string) string {
-	// Remove single-quoted string literals: 'text'
-	// Handle escaped quotes: 'don''t' becomes 'don''t'
-	query = regexp.MustCompile(`'(?:[^']|'')*'`).ReplaceAllString(query, "'LITERAL'")
+	var result strings.Builder
+	i := 0
+	n := len(query)
 
-	// Remove double-quoted identifiers: "column_name"
-	// Handle escaped quotes: "column""name" becomes "column""name"
-	query = regexp.MustCompile(`"(?:[^"]|"")*"`).ReplaceAllString(query, "\"IDENTIFIER\"")
+	for i < n {
+		// Check for single-line comment: --
+		if i+1 < n && query[i] == '-' && query[i+1] == '-' {
+			// Skip until end of line
+			for i < n && query[i] != '\n' && query[i] != '\r' {
+				i++
+			}
+			// Consume the newline character(s)
+			if i < n && query[i] == '\r' {
+				i++
+			}
+			if i < n && query[i] == '\n' {
+				i++
+			}
+			continue
+		}
 
-	// Remove backtick-quoted identifiers: `column_name`
-	query = regexp.MustCompile("`[^`]*`").ReplaceAllString(query, "`IDENTIFIER`")
+		// Check for multi-line comment: /* */
+		if i+1 < n && query[i] == '/' && query[i+1] == '*' {
+			i += 2
+			// Skip until */
+			for i+1 < n && !(query[i] == '*' && query[i+1] == '/') {
+				i++
+			}
+			if i+1 < n {
+				i += 2 // skip */
+			} else {
+				// Unclosed comment - skip all remaining input
+				i = n
+			}
+			continue
+		}
 
-	// Remove single-line comments: -- comment
-	query = regexp.MustCompile(`--[^\r\n]*`).ReplaceAllString(query, "")
+		// Check for single-quoted string literal
+		if query[i] == '\'' {
+			result.WriteString("'LITERAL'")
+			i++
+			// Skip until unescaped closing quote ('' is escaped quote)
+			for i < n {
+				if query[i] == '\'' {
+					i++
+					if i < n && query[i] == '\'' {
+						i++ // escaped quote, continue
+					} else {
+						break // end of string
+					}
+				} else {
+					i++
+				}
+			}
+			continue
+		}
 
-	// Remove multi-line comments: /* comment */
-	query = regexp.MustCompile(`/\*[^*]*\*+(?:[^/*][^*]*\*+)*/`).ReplaceAllString(query, "")
+		// Check for double-quoted identifier
+		if query[i] == '"' {
+			result.WriteString("\"IDENTIFIER\"")
+			i++
+			// Skip until unescaped closing quote ("" is escaped quote)
+			for i < n {
+				if query[i] == '"' {
+					i++
+					if i < n && query[i] == '"' {
+						i++ // escaped quote, continue
+					} else {
+						break // end of identifier
+					}
+				} else {
+					i++
+				}
+			}
+			continue
+		}
 
-	return strings.TrimSpace(query)
+		// Regular character - copy to output
+		result.WriteByte(query[i])
+		i++
+	}
+
+	return strings.TrimSpace(result.String())
 }
 
 // getQueryUsername returns the username of the user executing the query if present in OAuth context
