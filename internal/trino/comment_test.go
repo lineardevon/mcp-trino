@@ -109,6 +109,11 @@ SELECT * FROM "table"`,
 			expected: true,
 		},
 		{
+			name: "Backticks in comment with backtick identifiers",
+			query: "-- Use `backticks` for identifiers\nSELECT * FROM `table`",
+			expected: true,
+		},
+		{
 			name: "Mixed quotes in comment",
 			query: `-- It's "complicated" with 'all' the quotes
 SELECT 'value' FROM "table"`,
