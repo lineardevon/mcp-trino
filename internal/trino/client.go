@@ -2,6 +2,7 @@ package trino
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
 	"fmt"
 	"log"
@@ -58,22 +59,55 @@ type Client struct {
 	mu            sync.Mutex // Protects concurrent access to connection state
 }
 
+// createTransport creates an HTTP transport with appropriate TLS configuration.
+// When sslInsecure is true, certificate verification is disabled to support
+// self-signed certificates commonly used in internal/development environments.
+func createTransport(sslInsecure bool) *http.Transport {
+	// Safely clone DefaultTransport if it's an *http.Transport, otherwise create new
+	var transport *http.Transport
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = t.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
+
+	if sslInsecure {
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		}
+		transport.TLSClientConfig.InsecureSkipVerify = true //nolint:gosec // User-configurable for self-signed certs
+	} else if transport.TLSClientConfig != nil {
+		// Explicitly ensure secure mode if TLSClientConfig was cloned with InsecureSkipVerify=true
+		transport.TLSClientConfig.InsecureSkipVerify = false
+	}
+
+	return transport
+}
+
 // NewClient creates a new Trino client
 func NewClient(cfg *config.TrinoConfig) (*Client, error) {
+	// Create base transport with TLS config for SSLInsecure support
+	baseTransport := createTransport(cfg.SSLInsecure)
+
 	// Create HTTP client with custom headers (created once, reused for all connections)
 	httpClient := &http.Client{
 		Transport: &headerRoundTripper{
-			base:   http.DefaultTransport,
+			base:   baseTransport,
 			config: cfg,
 		},
 	}
 
-	// Register custom client once globally
+	// Register the custom client. Note: trino-go-client uses global registration,
+	// so only the first registration takes effect. Subsequent calls with different
+	// SSLInsecure settings will use the first client's TLS configuration.
 	if err := trino.RegisterCustomClient("mcp-trino", httpClient); err != nil {
-// Ignore "already registered" errors - this can happen in tests or when client is recreated
+		// Ignore "already registered" errors (process reuse, tests, multiple clients)
 		if !strings.Contains(err.Error(), "already registered") {
 			return nil, fmt.Errorf("failed to register custom HTTP client: %w", err)
 		}
+	} else if cfg.SSLInsecure {
+		// Only log on first successful registration to avoid log spam
+		log.Println("WARNING: TLS certificate verification disabled (TRINO_SSL_INSECURE=true)")
 	}
 
 	client := &Client{
