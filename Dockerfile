@@ -4,7 +4,7 @@ ARG TARGETPLATFORM
 ARG TARGETOS
 ARG TARGETARCH
 
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24.11-alpine AS builder
 
 WORKDIR /app
 
@@ -28,9 +28,8 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     go build -ldflags="-w -s" -trimpath -o trino-mcp ./cmd/
 
 # Use a small image for the final container (explicit target platform)
-FROM --platform=$TARGETPLATFORM alpine:latest
-
-RUN apk --no-cache add ca-certificates
+FROM --platform=$TARGETPLATFORM alpine:3.22.2
+RUN apk update && apk --no-cache add ca-certificates
 
 WORKDIR /app
 
