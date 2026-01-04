@@ -25,4 +25,9 @@ vendor/
 *.log
 
 # OS-specific files
-.DS_Store 
+.DS_Store
+
+# Claude Code plugin binary downloads
+.claude-plugin/mcp-trino
+.claude-plugin/mcp-trino.exe
+.claude-plugin/.mcp-trino-version
